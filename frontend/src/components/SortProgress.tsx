@@ -33,6 +33,10 @@ function getProgressBarClass(status: SortProgressEvent['status']): string {
 }
 
 function getStatusLabel(status: SortProgressEvent['status']): string {
+  if (status === 'fetching_metadata') {
+    return 'Fetching metadata of selected album(s)...';
+  }
+
   if (status === 'sorting') {
     return 'Sorting...';
   }

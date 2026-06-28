@@ -93,6 +93,29 @@ describe('SortProgress', () => {
     expect(screen.getByText(/5 \/ 10 files/)).toBeInTheDocument();
   });
 
+  it('shows metadata fetch progress', async () => {
+    mockStartSort.mockResolvedValue({ total_files: 10 });
+
+    render(<SortProgress albumIds={['a1']} onComplete={vi.fn()} onSessionExpired={vi.fn()} onAppExpired={vi.fn()} />);
+
+    await waitFor(() => {
+      expect(screen.queryByText(/starting sort/i)).not.toBeInTheDocument();
+    });
+
+    sendSSEEvent({
+      status: 'fetching_metadata',
+      total_files: 10,
+      completed_files: 4,
+      failed_files: 0,
+      current_file: '',
+      current_album: 'Vacation',
+      errors: [],
+    });
+
+    expect(screen.getByText(/fetching metadata of selected album\(s\)/i)).toBeInTheDocument();
+    expect(screen.getByText(/4 \/ 10 files/)).toBeInTheDocument();
+  });
+
   it('reconnects to progress without starting a duplicate sort when already started', async () => {
     render(
       <SortProgress

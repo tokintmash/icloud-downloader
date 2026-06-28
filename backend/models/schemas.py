@@ -65,7 +65,7 @@ class SortError(BaseModel):
 
 
 class SortProgressEvent(BaseModel):
-    status: str
+    status: Literal["fetching_metadata", "sorting", "complete", "error"]
     total_files: int
     completed_files: int
     failed_files: int

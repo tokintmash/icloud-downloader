@@ -511,6 +511,44 @@ def test_sync_album_metadata_handles_bad_asset(tmp_db):
         svc._requires_2fa = orig_2fa
 
 
+def test_sync_album_metadata_reports_progress_for_processed_and_skipped_assets(tmp_db):
+    import backend.services.icloud_service as svc
+    orig_icloud = svc._icloud
+    orig_2fa = svc._requires_2fa
+
+    good_asset = MagicMock()
+    good_asset.filename = "IMG_001.HEIC"
+
+    bad_asset = MagicMock()
+    type(bad_asset).filename = property(
+        lambda s: _raise_filename_access_error("no filename")
+    )
+    bad_asset._master_record = {}
+
+    mock_album = MagicMock()
+    mock_album.title = "Album"
+    mock_album.id = "a1"
+    mock_album.__iter__ = lambda s: iter([good_asset, bad_asset])
+
+    mock_icloud = MagicMock()
+    mock_icloud.photos.albums = [mock_album]
+    progress: list[tuple[int, str]] = []
+
+    svc._icloud = mock_icloud
+    svc._requires_2fa = False
+    try:
+        result = sync_album_metadata(
+            {"a1": "Album"},
+            album_ids=["a1"],
+            progress_callback=lambda completed, album: progress.append((completed, album)),
+        )
+        assert result == 1
+        assert progress == [(0, "Album"), (1, "Album"), (2, "Album")]
+    finally:
+        svc._icloud = orig_icloud
+        svc._requires_2fa = orig_2fa
+
+
 def test_sync_album_metadata_api_error_does_not_log_raw_response(tmp_db, caplog):
     import backend.services.icloud_service as svc
     orig_icloud = svc._icloud

@@ -54,36 +54,52 @@ class SorterService:
             logger.warning("Sort start blocked: iCloud folder missing or invalid")
             return {"error": "file_not_found", "message": "iCloud folder not found. Please configure it in settings."}
 
-        # Fetch album metadata from iCloud (only selected albums)
+        # Fetch lightweight album metadata so the active operation can report a determinate metadata phase.
         albums_result = icloud_service.get_albums()
         if isinstance(albums_result, dict) and "error" in albums_result:
             logger.warning("Sort start blocked: album fetch failed with error=%s", albums_result.get("error"))
             return albums_result
 
         folder_map = {a["id"]: a["folder_name"] for a in albums_result}
-        sync_result = icloud_service.sync_album_metadata(folder_map, album_ids)
-        if isinstance(sync_result, dict) and "error" in sync_result:
-            logger.warning("Sort start blocked: metadata sync failed with error=%s", sync_result.get("error"))
-            return sync_result
+        selected_album_ids = set(album_ids)
+        metadata_total = sum(
+            int(album.get("asset_count") or 0)
+            for album in albums_result
+            if album["id"] in selected_album_ids
+        )
 
-        state_service.reset_album_files(album_ids)
-        rows = state_service.get_pending_album_files(album_ids)
-
-        if not rows:
-            logger.warning("Sort start blocked: no pending files")
-            return {"error": "file_not_found", "message": "No files to sort for the selected albums. Fetch albums first."}
-
-        self._reset_progress(len(rows))
+        self._reset_metadata_progress(metadata_total)
         duplicate_handling = settings.get("duplicate_handling", "move_only")
         self._background_task = asyncio.create_task(
-            asyncio.to_thread(self._run_sort, rows, icloud_folder, duplicate_handling)
+            asyncio.to_thread(
+                self._run_metadata_fetch_and_sort,
+                folder_map,
+                album_ids,
+                icloud_folder,
+                duplicate_handling,
+            )
         )
         self._background_task.add_done_callback(self._clear_background_task)
-        logger.info("Sort started: total_files=%s duplicate_handling=%s", len(rows), duplicate_handling)
-        return {"total_files": len(rows)}
+        logger.info(
+            "Sort started: metadata_total=%s duplicate_handling=%s",
+            metadata_total,
+            duplicate_handling,
+        )
+        return {"total_files": metadata_total}
 
-    def _reset_progress(self, total_files: int) -> None:
+    def _reset_metadata_progress(self, total_files: int) -> None:
         self._running = True
+        self._status = "fetching_metadata"
+        self._total_files = total_files
+        self._completed_files = 0
+        self._failed_files = 0
+        self._current_file = ""
+        self._current_album = ""
+        self._errors = []
+        self._error_code = None
+        self._message = None
+
+    def _reset_sorting_progress(self, total_files: int) -> None:
         self._status = "sorting"
         self._total_files = total_files
         self._completed_files = 0
@@ -93,6 +109,50 @@ class SorterService:
         self._errors = []
         self._error_code = None
         self._message = None
+
+    def _update_metadata_progress(self, completed_files: int, current_album: str) -> None:
+        self._completed_files = completed_files
+        self._current_album = current_album
+        self._current_file = ""
+
+    def _record_terminal_error(self, error: str, message: str) -> None:
+        self._status = "error"
+        self._error_code = error
+        self._message = message
+        self._current_file = ""
+        self._current_album = ""
+        self._errors.append({"filename": "", "error": message, "album": ""})
+        self._running = False
+
+    def _run_metadata_fetch_and_sort(
+        self,
+        folder_map: dict[str, str],
+        album_ids: list[str],
+        icloud_folder: str,
+        duplicate_handling: str,
+    ) -> None:
+        sync_result = icloud_service.sync_album_metadata(
+            folder_map,
+            album_ids,
+            progress_callback=self._update_metadata_progress,
+        )
+        if isinstance(sync_result, dict) and "error" in sync_result:
+            logger.warning("Metadata sync failed with error=%s", sync_result.get("error"))
+            self._record_terminal_error(sync_result["error"], sync_result.get("message", "Metadata sync failed"))
+            return
+
+        state_service.reset_album_files(album_ids)
+        rows = state_service.get_pending_album_files(album_ids)
+        if not rows:
+            logger.warning("Sort stopped after metadata sync: no pending files")
+            self._record_terminal_error(
+                "file_not_found",
+                "No files to sort for the selected albums. Fetch albums first.",
+            )
+            return
+
+        self._reset_sorting_progress(len(rows))
+        self._run_sort(rows, icloud_folder, duplicate_handling)
 
     def _clear_background_task(self, task: asyncio.Task[None]) -> None:
         if self._background_task is task:
