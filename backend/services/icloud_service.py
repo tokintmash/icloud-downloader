@@ -1,7 +1,7 @@
 import base64
 import logging
 import re
-from typing import Any
+from typing import Any, Callable
 
 from pyicloud import PyiCloudService
 from pyicloud.exceptions import (
@@ -243,7 +243,11 @@ def get_albums() -> dict[str, Any] | list[dict[str, Any]]:
         return {"error": "internal_error", "message": f"Failed to fetch albums: {e}"}
 
 
-def sync_album_metadata(folder_map: dict[str, str], album_ids: list[str] | None = None) -> dict[str, Any] | int:
+def sync_album_metadata(
+    folder_map: dict[str, str],
+    album_ids: list[str] | None = None,
+    progress_callback: Callable[[int, str], None] | None = None,
+) -> dict[str, Any] | int:
     """Sync per-asset metadata into the album_files table.
 
     If *album_ids* is given, only those albums are synced; otherwise all albums.
@@ -258,6 +262,7 @@ def sync_album_metadata(folder_map: dict[str, str], album_ids: list[str] | None 
         rows: list[dict[str, str]] = []
         filter_ids = set(album_ids) if album_ids else None
         skipped_assets = 0
+        completed_assets = 0
 
         for album in photos.albums:
             name = getattr(album, "title", None) or getattr(album, "name", "")
@@ -267,9 +272,14 @@ def sync_album_metadata(folder_map: dict[str, str], album_ids: list[str] | None 
                 continue
 
             folder_name = folder_map.get(album_id, _sanitize_folder_name(name))
+            if progress_callback:
+                progress_callback(completed_assets, name)
 
             for asset in album:
                 fn = _get_asset_filename(asset)
+                completed_assets += 1
+                if progress_callback:
+                    progress_callback(completed_assets, name)
                 if not fn:
                     skipped_assets += 1
                     continue

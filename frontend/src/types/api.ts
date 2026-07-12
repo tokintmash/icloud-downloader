@@ -71,7 +71,7 @@ export interface SortError {
 }
 
 export interface SortProgressEvent {
-  status: 'sorting' | 'complete' | 'error';
+  status: 'fetching_metadata' | 'sorting' | 'complete' | 'error';
   total_files: number;
   completed_files: number;
   failed_files: number;

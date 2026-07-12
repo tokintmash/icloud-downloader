@@ -196,9 +196,8 @@ def test_sort_invalid_icloud_folder(mock_settings, mock_auth, tmp_db, sorter):
 )
 @patch(
     "backend.services.sorter_service.icloud_service.get_albums",
-    return_value=[{"id": "a1", "folder_name": "Album"}],
+    return_value=[{"id": "a1", "folder_name": "Album", "asset_count": 5}],
 )
-@patch("backend.services.sorter_service.icloud_service.sync_album_metadata", return_value=None)
 @patch("backend.services.sorter_service.state_service.reset_album_files")
 @patch(
     "backend.services.sorter_service.state_service.get_pending_album_files",
@@ -207,7 +206,6 @@ def test_sort_invalid_icloud_folder(mock_settings, mock_auth, tmp_db, sorter):
 def test_sort_start_tracks_background_task(
     mock_pending_rows,
     mock_reset,
-    mock_sync,
     mock_get_albums,
     mock_settings,
     mock_auth,
@@ -229,11 +227,14 @@ def test_sort_start_tracks_background_task(
          patch("backend.services.sorter_service.asyncio.create_task", return_value=task) as mock_create_task:
         result = sorter.start(["a1"])
 
-    assert result == {"total_files": 1}
+    assert result == {"total_files": 5}
     assert sorter._background_task is task
+    assert sorter.get_progress()["status"] == "fetching_metadata"
+    assert sorter.get_progress()["total_files"] == 5
     mock_to_thread.assert_called_once_with(
-        sorter._run_sort,
-        mock_pending_rows.return_value,
+        sorter._run_metadata_fetch_and_sort,
+        {"a1": "Album"},
+        ["a1"],
         "/tmp/icloud",
         "move_only",
     )
@@ -245,6 +246,51 @@ def test_sort_start_tracks_background_task(
     callback(task)
 
     assert sorter._background_task is None
+
+
+def test_metadata_fetch_progress_transitions_to_sorting(tmp_db, tmp_path, sorter):
+    rows = _make_rows("a1", "Vacation", ["IMG_001.HEIC", "IMG_002.HEIC"], "Vacation")
+    sorter._reset_metadata_progress(3)
+
+    def fake_sync(folder_map, album_ids, progress_callback=None):
+        assert folder_map == {"a1": "Vacation"}
+        assert album_ids == ["a1"]
+        assert progress_callback is not None
+        progress_callback(1, "Vacation")
+        progress_callback(3, "Vacation")
+        return 2
+
+    with patch("backend.services.sorter_service.icloud_service.sync_album_metadata", side_effect=fake_sync), \
+         patch("backend.services.sorter_service.state_service.reset_album_files") as mock_reset, \
+         patch("backend.services.sorter_service.state_service.get_pending_album_files", return_value=rows), \
+         patch.object(sorter, "_run_sort") as mock_run_sort:
+        sorter._run_metadata_fetch_and_sort({"a1": "Vacation"}, ["a1"], str(tmp_path), "move_only")
+
+    mock_reset.assert_called_once_with(["a1"])
+    mock_run_sort.assert_called_once_with(rows, str(tmp_path), "move_only")
+    progress = sorter.get_progress()
+    assert progress["status"] == "sorting"
+    assert progress["total_files"] == 2
+    assert progress["completed_files"] == 0
+    assert progress["current_album"] == ""
+
+
+def test_metadata_sync_failure_becomes_terminal_error(tmp_db, tmp_path, sorter):
+    sorter._reset_metadata_progress(2)
+
+    with patch(
+        "backend.services.sorter_service.icloud_service.sync_album_metadata",
+        return_value={"error": "internal_error", "message": "Metadata failed"},
+    ), patch("backend.services.sorter_service.state_service.reset_album_files") as mock_reset:
+        sorter._run_metadata_fetch_and_sort({"a1": "Vacation"}, ["a1"], str(tmp_path), "move_only")
+
+    mock_reset.assert_not_called()
+    progress = sorter.get_progress()
+    assert progress["status"] == "error"
+    assert progress["error_code"] == "internal_error"
+    assert progress["message"] == "Metadata failed"
+    assert progress["errors"] == [{"filename": "", "error": "Metadata failed", "album": ""}]
+    assert not sorter.is_running()
 
 
 def test_file_index_updated_after_move(tmp_db, tmp_path, sorter):
